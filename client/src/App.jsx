@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import Webcam from "react-webcam";
 
-const API_URL = "http://localhost:5000";
+const API_URL = "https://thalai.onrender.com";
 
 const FEATURE_INFO = {
   voice: {
@@ -109,7 +109,7 @@ const App = () => {
   const fileInputRef = useRef(null);
   const webcamRef = useRef(null);
 
-  const backgroundVideoUrl = "Iron Man Avengers Infinity War Version Marvel Desktop Live Wallpaper-1078p.mp4";
+const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Desktop Live Wallpaper-1078p.mp4";
 
   const categories = [
     { id: "general", name: "📰 Top News", emoji: "📰" },
