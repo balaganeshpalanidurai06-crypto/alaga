@@ -3,7 +3,7 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const OpenAI = require('openai');
+const axios = require('axios');
 const Groq = require('groq-sdk');
 const sharp = require('sharp');
 
@@ -11,23 +11,17 @@ require('dotenv').config();
 
 const PORT = process.env.PORT || 5000;
 
-// API KEYS
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// OpenRouter
-const openrouter = new OpenAI({
-  apiKey: OPENROUTER_API_KEY,
-  baseURL: "https://openrouter.ai/api/v1",
-});
-
-// Groq
+// Clients
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
+// Temp history
 let tempHistory = [];
 let historyIdCounter = 1;
 
@@ -37,26 +31,23 @@ if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+  filename: (req, file, cb) =>
+    cb(null, Date.now() + path.extname(file.originalname))
 });
 
 const upload = multer({ storage });
 
-// MODELS
+// Models
 const GROQ_MODELS = [
   "llama-3.1-8b-instant",
   "mixtral-8x7b-32768"
 ];
 
-// ✅ WORKING VISION MODELS (OpenRouter)
-const VISION_MODELS = [
-  "openai/gpt-4o-mini",       // BEST (fast + stable)
-  "google/gemini-flash-1.5",  // backup
-];
-
-// ---------------- CHAT ----------------
+/* ================= CHAT ================= */
 app.post('/api/chat', async (req, res) => {
   const { message } = req.body;
+
+  if (!message) return res.status(400).send("Message required");
 
   res.setHeader("Content-Type", "text/event-stream");
 
@@ -78,72 +69,74 @@ app.post('/api/chat', async (req, res) => {
 
       res.end();
       return;
+
     } catch (err) {
-      console.log(`❌ Groq ${model} failed`);
+      console.log(`❌ Chat ${model} failed`);
     }
   }
 
-  res.write("AI unavailable");
+  res.write("⚠️ AI unavailable");
   res.end();
 });
 
-// ---------------- VISION ----------------
+/* ================= VISION (GEMINI 2.5 FLASH) ================= */
 app.post('/api/vision', upload.single('image'), async (req, res) => {
   const { question } = req.body;
   const imageFile = req.file;
 
-  if (!imageFile) return res.status(400).json({ error: "No image" });
+  if (!imageFile) {
+    return res.status(400).json({ error: "No image uploaded" });
+  }
 
   try {
+    // Resize & optimize image
     const buffer = await sharp(imageFile.path)
       .resize(800, 800, { fit: 'inside' })
       .jpeg({ quality: 80 })
       .toBuffer();
 
+    // Delete temp file
     fs.unlinkSync(imageFile.path);
 
-    const base64 = `data:image/jpeg;base64,${buffer.toString('base64')}`;
-    const prompt = question || "Describe this image";
+    const base64Image = buffer.toString("base64");
+    const prompt = question || "Describe this image in detail.";
 
-    let result = null;
-
-    for (const model of VISION_MODELS) {
-      try {
-        console.log("Trying:", model);
-
-        const response = await openrouter.chat.completions.create({
-          model,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              { type: "image_url", image_url: { url: base64 } }
+    // 🔥 Gemini API call
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              {
+                inline_data: {
+                  mime_type: "image/jpeg",
+                  data: base64Image
+                }
+              }
             ]
-          }]
-        });
-
-        result = response.choices[0].message.content;
-        console.log("✅ Success:", model);
-        break;
-
-      } catch (err) {
-        console.log("❌ Failed:", model, err.message);
+          }
+        ]
       }
-    }
+    );
 
-    if (!result) {
-      result = "Vision AI overloaded. Try again later.";
-    }
+    const result =
+      response.data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "No response from Gemini";
 
     res.json({ response: result });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Vision failed" });
+    console.error("❌ Gemini Vision Error:", err.response?.data || err.message);
+
+    res.json({
+      response: "⚠️ Gemini vision failed. Try again."
+    });
   }
 });
 
-// ---------------- HISTORY ----------------
+/* ================= HISTORY ================= */
 app.get('/api/all-history', (req, res) => {
   res.json(tempHistory.reverse());
 });
@@ -160,10 +153,26 @@ app.post('/api/save-history', (req, res) => {
   };
 
   tempHistory.push(record);
+
+  if (tempHistory.length > 200) {
+    tempHistory = tempHistory.slice(-200);
+  }
+
   res.json({ success: true });
 });
 
-// ---------------- START ----------------
+/* ================= HEALTH ================= */
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: "OK",
+    message: "AURA AI running with Gemini Vision + Groq Chat",
+    historyCount: tempHistory.length
+  });
+});
+
+/* ================= START ================= */
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on ${PORT}`);
+  console.log(`🚀 AURA Server running on ${PORT}`);
+  console.log(`🤖 Groq Chat : ${GROQ_API_KEY ? "OK" : "Missing"}`);
+  console.log(`👁️ Gemini Vision : ${GEMINI_API_KEY ? "OK" : "Missing"}`);
 });
