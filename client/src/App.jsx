@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import Webcam from "react-webcam";
 
-const API_URL = "https://thalai.onrender.com";
+const API_URL = "http://localhost:5000";
 
 const FEATURE_INFO = {
   voice: {
