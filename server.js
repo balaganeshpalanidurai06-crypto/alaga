@@ -142,12 +142,12 @@ async function callAI(messages) {
 //  VISION PROVIDERS
 // ════════════════════════════════════════════════════════════════════════════
 
-// 1️⃣  Groq Vision — llama-3.2 vision (works with base64 image!)
+// 1️⃣  Groq Vision — Llama 4 Scout/Maverick (multimodal, replacing deprecated llama-3.2-vision)
 async function tryGroqVision(base64Image, question) {
   if (!GROQ_API_KEY) return null;
   const visionModels = [
-    'llama-3.2-90b-vision-preview',
-    'llama-3.2-11b-vision-preview',
+    'meta-llama/llama-4-scout-17b-16e-instruct',   // Llama 4 Scout — vision support ✅
+    'meta-llama/llama-4-maverick-17b-128e-instruct', // Llama 4 Maverick — vision support ✅
   ];
   const prompt = question?.trim() || 'Describe this image in detail. What do you see? Include objects, people, colors, setting, and any text visible.';
 
@@ -184,13 +184,15 @@ async function tryGroqVision(base64Image, question) {
   return null;
 }
 
-// 2️⃣  OpenRouter Vision
+// 2️⃣  OpenRouter Vision — only models with confirmed vision endpoints
 async function tryOpenRouterVision(base64Image, question) {
   if (!OPENROUTER_KEY) return null;
   const visionModels = [
-    'meta-llama/llama-3.2-11b-vision-instruct:free',
-    'google/gemma-3-27b-it:free',
-    'qwen/qwen2.5-vl-72b-instruct:free',
+    'qwen/qwen2.5-vl-7b-instruct:free',          // Qwen VL — confirmed working ✅
+    'qwen/qwen2.5-vl-72b-instruct:free',          // Qwen VL large ✅
+    'microsoft/phi-4-multimodal-instruct:free',   // Phi-4 multimodal ✅
+    'google/gemini-2.0-flash-exp:free',           // Gemini flash free ✅
+    'mistralai/pixtral-12b:free',                 // Pixtral vision ✅
   ];
   const prompt = question?.trim() || 'Describe this image in detail.';
 
@@ -231,35 +233,39 @@ async function tryOpenRouterVision(base64Image, question) {
   return null;
 }
 
-// 3️⃣  Gemini Vision
+// 3️⃣  Gemini Vision — correct model names for current API
 async function tryGeminiVision(base64Image, question) {
   if (!GEMINI_API_KEY) return null;
   const prompt = question?.trim() || 'Describe this image in detail.';
-  const models = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+  // Only v1beta works for vision; use gemini-2.0 models only
+  const models = [
+    'gemini-2.0-flash',
+    'gemini-2.0-flash-lite',
+    'gemini-2.5-flash-preview-04-17', // latest
+    'gemini-2.5-pro-preview-03-25',
+  ];
 
   for (const model of models) {
-    for (const ver of ['v1beta', 'v1']) {
-      try {
-        console.log(`  [Gemini Vision] ${model}/${ver}`);
-        const res = await axios.post(
-          `https://generativelanguage.googleapis.com/${ver}/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
-          {
-            contents: [{
-              parts: [
-                { text: prompt },
-                { inline_data: { mime_type: 'image/jpeg', data: base64Image } },
-              ],
-            }],
-          },
-          { timeout: 30000 }
-        );
-        const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) { console.log(`  [Gemini Vision] ✅`); return { text, provider: `Gemini Vision/${model}` }; }
-      } catch (e) {
-        const msg = e.response?.data?.error?.message || e.message;
-        console.log(`  [Gemini Vision] ❌ ${msg.substring(0, 80)}`);
-        if (msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED')) break;
-      }
+    try {
+      console.log(`  [Gemini Vision] ${model}`);
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          contents: [{
+            parts: [
+              { text: prompt },
+              { inline_data: { mime_type: 'image/jpeg', data: base64Image } },
+            ],
+          }],
+        },
+        { timeout: 30000 }
+      );
+      const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) { console.log(`  [Gemini Vision] ✅`); return { text, provider: `Gemini Vision/${model}` }; }
+    } catch (e) {
+      const msg = e.response?.data?.error?.message || e.message;
+      console.log(`  [Gemini Vision] ❌ ${msg.substring(0, 80)}`);
+      if (msg.includes('quota') || msg.includes('RESOURCE_EXHAUSTED')) break; // all gemini models will fail, stop
     }
   }
   return null;
@@ -339,10 +345,30 @@ async function tryBLIPVision(imageBuffer, question) {
 //  ROUTES
 // ════════════════════════════════════════════════════════════════════════════
 
+// ── Vision rate limit tracker (per IP, 2 min cooldown) ───────────────────────
+const visionLastCall = new Map(); // ip → timestamp
+const VISION_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+
 // ── VISION ────────────────────────────────────────────────────────────────────
 app.post('/api/vision', upload.single('image'), async (req, res) => {
   const { question } = req.body;
   if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+
+  // ── Cooldown check ──────────────────────────────────────────────────────────
+  const ip = req.ip || req.connection.remoteAddress || 'unknown';
+  const lastCall = visionLastCall.get(ip) || 0;
+  const elapsed  = Date.now() - lastCall;
+  const remaining = VISION_COOLDOWN_MS - elapsed;
+
+  if (remaining > 0) {
+    try { fs.unlinkSync(req.file.path); } catch {}
+    const secs = Math.ceil(remaining / 1000);
+    return res.status(429).json({
+      cooldown: true,
+      remainingSeconds: secs,
+      response: `COOLDOWN:${secs}`,
+    });
+  }
 
   console.log(`\n👁️ Vision: "${question || '(no question)'}"`);
 
@@ -358,24 +384,12 @@ app.post('/api/vision', upload.single('image'), async (req, res) => {
     // Chain: Groq Vision → OpenRouter Vision → Gemini Vision → BLIP (no key)
     let result = null;
 
-    result = await tryGroqVision(base64Image, question);       if (result) return res.json({ response: result.text, provider: result.provider });
-    result = await tryOpenRouterVision(base64Image, question); if (result) return res.json({ response: result.text, provider: result.provider });
-    result = await tryGeminiVision(base64Image, question);     if (result) return res.json({ response: result.text, provider: result.provider });
-    result = await tryBLIPVision(imageBuffer, question);       if (result) return res.json({ response: result.text, provider: result.provider });
+    result = await tryGroqVision(base64Image, question);       if (result) { visionLastCall.set(ip, Date.now()); return res.json({ response: result.text, provider: result.provider }); }
+    result = await tryOpenRouterVision(base64Image, question); if (result) { visionLastCall.set(ip, Date.now()); return res.json({ response: result.text, provider: result.provider }); }
+    result = await tryGeminiVision(base64Image, question);     if (result) { visionLastCall.set(ip, Date.now()); return res.json({ response: result.text, provider: result.provider }); }
+    result = await tryBLIPVision(imageBuffer, question);       if (result) { visionLastCall.set(ip, Date.now()); return res.json({ response: result.text, provider: result.provider }); }
 
-    // Everything failed — give clear message
-    res.json({
-      response:
-        '⚠️ Vision analysis failed.\n\n' +
-        'Quick fix — get a FREE Groq key (2 minutes):\n' +
-        '1. Go to https://console.groq.com\n' +
-        '2. Sign up / Login\n' +
-        '3. Click "API Keys" → "Create API Key"\n' +
-        '4. Copy the key\n' +
-        '5. Paste in .env as: GROQ_API_KEY=your_key_here\n' +
-        '6. Restart: node server.js\n\n' +
-        'Groq has vision support and is completely free!',
-    });
+    res.json({ response: '⚠️ Vision analysis temporarily unavailable. Please try again in a moment.' });
 
   } catch (err) {
     console.error('❌ Vision Error:', err.message);

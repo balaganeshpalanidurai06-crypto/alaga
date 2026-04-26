@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 import Webcam from "react-webcam";
 
-const API_URL = "http://localhost:5000";
+const API_URL = "https://alaga.onrender.com";
 
 const FEATURE_INFO = {
   voice: {
@@ -30,12 +30,12 @@ const FEATURE_INFO = {
   lense: {
     icon: "📷", label: "AI LENSE", sub: "VISION", color: "#f472b6",
     rows: [
-      ["MODE",   "Image Analysis (Vision AI)"],
-      ["INPUT",  "Camera Capture / Gallery"],
-      ["QUERY",  "Ask anything about image"],
-      ["OUTPUT", "Detailed AI Description"],
-      ["VOICE",  "Auto Speech Readout"],
-      ["STATUS", "ONLINE ● ACTIVE"],
+      ["MODE",     "Image Analysis (Vision AI)"],
+      ["INPUT",    "Camera Capture / Gallery"],
+      ["QUERY",    "Ask anything about image"],
+      ["OUTPUT",   "Detailed AI Description"],
+      ["COOLDOWN", "2 min between analyses"],
+      ["STATUS",   "ONLINE ● ACTIVE"],
     ]
   },
   news: {
@@ -58,6 +58,8 @@ const DEFAULT_SETTINGS = {
   appearance: 'dark',
   notifSound: true,
 };
+
+const COOLDOWN_SECS = 120; // 2 minutes
 
 const App = () => {
   const [allHistory, setAllHistory] = useState([]);
@@ -104,12 +106,34 @@ const App = () => {
   const [showCamera, setShowCamera] = useState(false);
   const [cameraPhoto, setCameraPhoto] = useState(null);
 
+  // ── COOLDOWN STATE ─────────────────────────────────────────────────────────
+  const [cooldownSecs, setCooldownSecs] = useState(0); // 0 = ready, >0 = waiting
+  const cooldownRef = useRef(null);
+
+  const startCooldown = (secs = COOLDOWN_SECS) => {
+    setCooldownSecs(secs);
+    clearInterval(cooldownRef.current);
+    cooldownRef.current = setInterval(() => {
+      setCooldownSecs(prev => {
+        if (prev <= 1) { clearInterval(cooldownRef.current); return 0; }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const cooldownPercent = Math.round(((COOLDOWN_SECS - cooldownSecs) / COOLDOWN_SECS) * 100);
+  const cooldownMins = Math.floor(cooldownSecs / 60);
+  const cooldownSecsRem = cooldownSecs % 60;
+  const cooldownActive = cooldownSecs > 0;
+
+  // ──────────────────────────────────────────────────────────────────────────
+
   const recognitionRef = useRef(null);
   const waveAnimRef = useRef(null);
   const fileInputRef = useRef(null);
   const webcamRef = useRef(null);
 
-const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Desktop Live Wallpaper-1078p.mp4";
+  const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Desktop Live Wallpaper-1078p.mp4";
 
   const categories = [
     { id: "general", name: "📰 Top News", emoji: "📰" },
@@ -212,9 +236,7 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
       setNews(final);
       setNewsCache(p => ({...p, [category]: final}));
       setLastFetchTime(p => ({...p, [category]: now}));
-      await axios.post(`${API_URL}/api/save-history`, {
-        type:"news", question:`📰 Read ${category} news`, answer:`Fetched ${final.length} articles`
-      });
+      await axios.post(`${API_URL}/api/save-history`, { type:"news", question:`📰 Read ${category} news`, answer:`Fetched ${final.length} articles` });
     } catch { setNews(getCategorySpecificNews(category)); }
     setNewsLoading(false);
   };
@@ -266,42 +288,31 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
     setWeatherLoading(false);
   };
 
-  // ✅ Load temporary history - NO EMAIL
   const loadHistory = async () => {
     setHistoryLoading(true);
     try {
       const response = await axios.get(`${API_URL}/api/all-history`);
       setAllHistory(response.data || []);
-    } catch (err) {
-      console.error('Load history error:', err);
-      setAllHistory([]);
-    }
+    } catch { setAllHistory([]); }
     setHistoryLoading(false);
   };
 
   const deleteHistory = async (id) => {
     if (!window.confirm("Delete this conversation?")) return;
-    try {
-      await axios.delete(`${API_URL}/api/history/${id}`);
-      loadHistory();
-    } catch(err) { console.error('Delete error:', err); }
+    try { await axios.delete(`${API_URL}/api/history/${id}`); loadHistory(); } catch {}
   };
 
-  useEffect(() => {
-    loadHistory();
-  }, []);
-
+  useEffect(() => { loadHistory(); }, []);
   useEffect(() => { if (showHistory) loadHistory(); }, [showHistory]);
-
   useEffect(() => {
     if (isListening || isSpeaking) {
       waveAnimRef.current = setInterval(() => setWaveValues(Array(30).fill(0).map(() => Math.random() * 40 + 4)), 120);
     } else { clearInterval(waveAnimRef.current); setWaveValues(Array(30).fill(4)); }
     return () => clearInterval(waveAnimRef.current);
   }, [isListening, isSpeaking]);
-
   useEffect(() => { if (activeFeature === "news") fetchNews(selectedCategory); }, [activeFeature, selectedCategory]);
   useEffect(() => { const t = setTimeout(() => preloadAllNews(), 2000); return () => clearTimeout(t); }, []);
+  useEffect(() => { return () => clearInterval(cooldownRef.current); }, []);
 
   const speakText = (text) => {
     window.speechSynthesis.cancel();
@@ -319,8 +330,7 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
       const reader = res.body.getReader(), dec = new TextDecoder("utf-8"); let bot = "";
       while (true) { const { done, value } = await reader.read(); if (done) break; bot += dec.decode(value); setAiAnswer(bot); }
       await axios.post(`${API_URL}/api/save-history`, { type:"voice", question, answer:bot });
-      loadHistory();
-      speakText(bot);
+      loadHistory(); speakText(bot);
     } catch { setAiAnswer("Sorry, AI connection failed!"); }
   };
 
@@ -439,17 +449,49 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
   const startCamera = () => { setShowCamera(true); setSelectedImage(null); setImagePreview(null); setVisionAnswer(""); setVisionQuestion(""); };
   const closeCamera = () => setShowCamera(false);
 
+  // ── VISION SUBMIT with cooldown handling ──────────────────────────────────
   const handleVisionSubmit = async () => {
     if (!selectedImage) { alert("Please capture or select an image first!"); return; }
-    setVisionLoading(true); setVisionAnswer("Analyzing image...");
-    const fd = new FormData(); fd.append("image", selectedImage); fd.append("question", visionQuestion || "Describe this image in detail");
+    if (cooldownActive) return; // blocked during cooldown
+
+    setVisionLoading(true);
+    setVisionAnswer("🔍 Analyzing image...");
+
+    const fd = new FormData();
+    fd.append("image", selectedImage);
+    fd.append("question", visionQuestion || "Describe this image in detail");
+
     try {
-      const res = await axios.post(`${API_URL}/api/vision`, fd, { headers:{"Content-Type":"multipart/form-data"} });
-      setVisionAnswer(res.data.response);
-      await axios.post(`${API_URL}/api/save-history`, { type:"vision", question:visionQuestion||"Analyzed image", answer:res.data.response });
+      const res = await axios.post(`${API_URL}/api/vision`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+        validateStatus: () => true, // don't throw on 429
+      });
+
+      if (res.status === 429 || res.data?.cooldown) {
+        // Server says still in cooldown
+        const secs = res.data?.remainingSeconds || COOLDOWN_SECS;
+        startCooldown(secs);
+        setVisionAnswer("");
+        setVisionLoading(false);
+        return;
+      }
+
+      const answer = res.data?.response || "Could not analyze image.";
+      setVisionAnswer(answer);
+
+      // Start cooldown after successful analysis
+      startCooldown(COOLDOWN_SECS);
+
+      await axios.post(`${API_URL}/api/save-history`, {
+        type: "vision",
+        question: visionQuestion || "Analyzed image",
+        answer,
+      });
       loadHistory();
-      speakText(res.data.response);
-    } catch { setVisionAnswer("Failed to analyze image."); }
+      speakText(answer);
+    } catch {
+      setVisionAnswer("Failed to analyze image. Please try again.");
+    }
     setVisionLoading(false);
   };
 
@@ -469,6 +511,26 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
           <div style={S.skeletonTitle}/><div style={S.skeletonLine}/><div style={S.skeletonLineShort}/>
         </div>
       ))}
+    </div>
+  );
+
+  // ── COOLDOWN DISPLAY COMPONENT ─────────────────────────────────────────────
+  const CooldownBanner = () => (
+    <div style={S.cooldownBanner}>
+      <div style={S.cooldownTop}>
+        <span style={S.cooldownIcon}>⏳</span>
+        <span style={S.cooldownLabel}>NEXT ANALYSIS AVAILABLE IN</span>
+        <span style={S.cooldownTime}>
+          {cooldownMins}:{cooldownSecsRem.toString().padStart(2, '0')}
+        </span>
+      </div>
+      {/* Progress bar */}
+      <div style={S.cooldownBarBg}>
+        <div style={{ ...S.cooldownBarFill, width: `${cooldownPercent}%` }} />
+      </div>
+      <div style={S.cooldownSub}>
+        AI vision models need a short rest between calls. You can upload a new image now and analyze when ready.
+      </div>
     </div>
   );
 
@@ -496,6 +558,8 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
         @keyframes overlayFade{0%{opacity:0;}30%{opacity:1;}70%{opacity:1;}100%{opacity:0;}}
         @keyframes slideInR{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
         @keyframes modalFadeIn{from{opacity:0;transform:translate(-50%,-48%)}to{opacity:1;transform:translate(-50%,-50%)}}
+        @keyframes cooldownPulse{0%,100%{opacity:1;}50%{opacity:0.6;}}
+        @keyframes barFlow{0%{background-position:0% 50%;}100%{background-position:100% 50%;}}
         .feat-btn{background:rgba(0,0,0,0.45);border:1.5px solid rgba(74,255,158,0.25);border-radius:16px;padding:18px;text-align:center;transition:background .25s,transform .2s;cursor:pointer;color:#fff;animation:btnBorderBlink 2s ease-in-out infinite,liteFloat 4s ease-in-out infinite;}
         .feat-btn:hover{background:rgba(74,255,158,0.12);transform:scale(1.04) translateY(-4px);}
         .nav-btn-hover:hover{background:rgba(74,255,158,0.15)!important;border-color:rgba(74,255,158,0.5)!important;}
@@ -512,6 +576,9 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
         ::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:transparent;}::-webkit-scrollbar-thumb{background:rgba(74,255,158,0.3);border-radius:4px;}
         select option { background: #1a1a2e !important; color: #ffffff !important; }
         select { color-scheme: dark; }
+        .analyze-btn-ready{background:rgba(74,255,158,0.2);border:1px solid rgba(74,255,158,0.3);color:#4aff9e;cursor:pointer;}
+        .analyze-btn-ready:hover{background:rgba(74,255,158,0.35);}
+        .analyze-btn-cooldown{background:rgba(255,180,0,0.12);border:1px solid rgba(255,180,0,0.3);color:#ffb400;cursor:not-allowed;opacity:0.7;}
       `}</style>
 
       <div style={S.topLeftBrand}>
@@ -563,18 +630,12 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
           <div style={S.historyBackdrop} onClick={() => setShowHistory(false)}/>
           <div style={S.historySidebar}>
             <div style={S.historyHeader}>
-              <div>
-                <span>📜 HISTORY</span>
-                <div style={{fontSize:10,color:"rgba(74,255,158,0.7)",marginTop:3}}>Temporary (max 50)</div>
-              </div>
+              <div><span>📜 HISTORY</span><div style={{fontSize:10,color:"rgba(74,255,158,0.7)",marginTop:3}}>Temporary (max 50)</div></div>
               <button onClick={() => setShowHistory(false)} style={S.closeHistoryBtn}>✕</button>
             </div>
             <div style={S.historyListSidebar}>
               {historyLoading ? (<div style={S.noHistory}>Loading...</div>) : allHistory.length === 0 ? (
-                <div style={S.noHistory}>
-                  <div style={{fontSize:32,marginBottom:10}}>📭</div>
-                  No conversations yet
-                </div>
+                <div style={S.noHistory}><div style={{fontSize:32,marginBottom:10}}>📭</div>No conversations yet</div>
               ) : (
                 allHistory.map(item => (
                   <div key={item.id} style={S.historyItemSidebar}>
@@ -612,20 +673,11 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
           <div style={S.modalBackdrop} onClick={() => setShowSettings(false)}/>
           <div style={S.settingsModal}>
             <div style={S.settingsSidebar}>
-              <div style={S.settingsSidebarTitle}>
-                <span style={{fontFamily:"'Orbitron',sans-serif",fontSize:12,color:"#4aff9e",letterSpacing:1}}>AURA</span>
-              </div>
+              <div style={S.settingsSidebarTitle}><span style={{fontFamily:"'Orbitron',sans-serif",fontSize:12,color:"#4aff9e",letterSpacing:1}}>AURA</span></div>
               <button onClick={() => setShowSettings(false)} style={S.settingsCloseBtn}>✕</button>
-              {[
-                {key:'general', label:'General', icon:'⚙️'},
-                {key:'notifications', label:'Notifications', icon:'🔔'},
-                {key:'data', label:'Data Controls', icon:'🗄️'},
-              ].map(({key,label,icon}) => (
-                <button key={key} className="sett-tab-hover"
-                  onClick={() => setSettingsTab(key)}
-                  style={{...S.settingsTabBtn, ...(settingsTab===key ? S.settingsTabActive : {})}}>
-                  <span style={{fontSize:15}}>{icon}</span>
-                  <span>{label}</span>
+              {[{key:'general',label:'General',icon:'⚙️'},{key:'notifications',label:'Notifications',icon:'🔔'},{key:'data',label:'Data Controls',icon:'🗄️'}].map(({key,label,icon}) => (
+                <button key={key} className="sett-tab-hover" onClick={() => setSettingsTab(key)} style={{...S.settingsTabBtn,...(settingsTab===key?S.settingsTabActive:{})}}>
+                  <span style={{fontSize:15}}>{icon}</span><span>{label}</span>
                 </button>
               ))}
             </div>
@@ -636,42 +688,12 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
                   <h2 style={S.settingsTitle}>General</h2>
                   <div style={S.settingsDivider}/>
                   {[
-                    { label: "Appearance", desc: "Choose your display theme", control: (
-                      <select value={settings.appearance} onChange={e=>updateSettings('appearance',e.target.value)} style={S.settingSelect}>
-                        <option value="dark">Dark</option>
-                        <option value="system">System</option>
-                      </select>
-                    )},
-                    { label: "Spoken Language", desc: "Language for speech recognition", control: (
-                      <select value={settings.speechLang} onChange={e=>updateSettings('speechLang',e.target.value)}
-                        style={{...S.settingSelect, background:"#0d1117", color:"#fff", minWidth:160}}>
-                        <option value="en-US">English (US)</option>
-                        <option value="en-GB">English (UK)</option>
-                        <option value="ta-IN">Tamil (India)</option>
-                        <option value="hi-IN">Hindi (India)</option>
-                        <option value="te-IN">Telugu (India)</option>
-                        <option value="ml-IN">Malayalam (India)</option>
-                        <option value="kn-IN">Kannada (India)</option>
-                        <option value="bn-IN">Bengali (India)</option>
-                      </select>
-                    )},
-                    { label: "Voice Speed", desc: `Playback speed: ${settings.voiceRate}x`, control: (
-                      <div style={{display:"flex",alignItems:"center",gap:10}}>
-                        <input type="range" min="0.5" max="2" step="0.1" value={settings.voiceRate} onChange={e=>updateSettings('voiceRate',parseFloat(e.target.value))} style={{width:120}}/>
-                        <span style={{color:"#4aff9e",fontSize:12,minWidth:30}}>{settings.voiceRate}x</span>
-                      </div>
-                    )},
-                    { label: "Voice Pitch", desc: `Pitch level: ${settings.voicePitch}`, control: (
-                      <div style={{display:"flex",alignItems:"center",gap:10}}>
-                        <input type="range" min="0.5" max="2" step="0.1" value={settings.voicePitch} onChange={e=>updateSettings('voicePitch',parseFloat(e.target.value))} style={{width:120}}/>
-                        <span style={{color:"#4aff9e",fontSize:12,minWidth:30}}>{settings.voicePitch}</span>
-                      </div>
-                    )},
+                    { label:"Appearance", desc:"Choose your display theme", control:(<select value={settings.appearance} onChange={e=>updateSettings('appearance',e.target.value)} style={S.settingSelect}><option value="dark">Dark</option><option value="system">System</option></select>) },
+                    { label:"Spoken Language", desc:"Language for speech recognition", control:(<select value={settings.speechLang} onChange={e=>updateSettings('speechLang',e.target.value)} style={{...S.settingSelect,background:"#0d1117",color:"#fff",minWidth:160}}><option value="en-US">English (US)</option><option value="en-GB">English (UK)</option><option value="ta-IN">Tamil (India)</option><option value="hi-IN">Hindi (India)</option><option value="te-IN">Telugu (India)</option><option value="ml-IN">Malayalam (India)</option><option value="kn-IN">Kannada (India)</option><option value="bn-IN">Bengali (India)</option></select>) },
+                    { label:"Voice Speed", desc:`Playback speed: ${settings.voiceRate}x`, control:(<div style={{display:"flex",alignItems:"center",gap:10}}><input type="range" min="0.5" max="2" step="0.1" value={settings.voiceRate} onChange={e=>updateSettings('voiceRate',parseFloat(e.target.value))} style={{width:120}}/><span style={{color:"#4aff9e",fontSize:12,minWidth:30}}>{settings.voiceRate}x</span></div>) },
+                    { label:"Voice Pitch", desc:`Pitch level: ${settings.voicePitch}`, control:(<div style={{display:"flex",alignItems:"center",gap:10}}><input type="range" min="0.5" max="2" step="0.1" value={settings.voicePitch} onChange={e=>updateSettings('voicePitch',parseFloat(e.target.value))} style={{width:120}}/><span style={{color:"#4aff9e",fontSize:12,minWidth:30}}>{settings.voicePitch}</span></div>) },
                   ].map(({label,desc,control},i) => (
-                    <div key={i} style={S.settingRow}>
-                      <div><div style={S.settingLabel}>{label}</div><div style={S.settingDesc}>{desc}</div></div>
-                      {control}
-                    </div>
+                    <div key={i} style={S.settingRow}><div><div style={S.settingLabel}>{label}</div><div style={S.settingDesc}>{desc}</div></div>{control}</div>
                   ))}
                 </>
               )}
@@ -679,14 +701,11 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
                 <>
                   <h2 style={S.settingsTitle}>Notifications</h2>
                   <div style={S.settingsDivider}/>
-                  {[
-                    { label:"AI Response Sound", desc:"Play a sound when AI responds", key:"notifSound" },
-                    { label:"Voice Feedback", desc:"Speak AI responses aloud automatically", key:"autoSpeak" },
-                  ].map(({label,desc,key}) => (
+                  {[{label:"AI Response Sound",desc:"Play a sound when AI responds",key:"notifSound"},{label:"Voice Feedback",desc:"Speak AI responses aloud automatically",key:"autoSpeak"}].map(({label,desc,key}) => (
                     <div key={key} style={S.settingRow}>
                       <div><div style={S.settingLabel}>{label}</div><div style={S.settingDesc}>{desc}</div></div>
-                      <div style={{...S.toggle, background:settings[key]!==false?"#4aff9e":"rgba(255,255,255,0.2)"}} onClick={() => updateSettings(key, settings[key]===false)}>
-                        <div style={{...S.toggleKnob, transform:settings[key]!==false?"translateX(20px)":"translateX(0)"}}/>
+                      <div style={{...S.toggle,background:settings[key]!==false?"#4aff9e":"rgba(255,255,255,0.2)"}} onClick={() => updateSettings(key,settings[key]===false)}>
+                        <div style={{...S.toggleKnob,transform:settings[key]!==false?"translateX(20px)":"translateX(0)"}}/>
                       </div>
                     </div>
                   ))}
@@ -696,18 +715,9 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
                 <>
                   <h2 style={S.settingsTitle}>Data Controls</h2>
                   <div style={S.settingsDivider}/>
-                  <div style={S.settingRow}>
-                    <div><div style={S.settingLabel}>Conversation History</div><div style={S.settingDesc}>Delete all conversations (temporary storage)</div></div>
-                    <button onClick={clearAllHistory} style={S.dangerBtn}>Clear History</button>
-                  </div>
-                  <div style={S.settingRow}>
-                    <div><div style={S.settingLabel}>Reset Settings</div><div style={S.settingDesc}>Restore all settings to default values</div></div>
-                    <button onClick={() => { localStorage.removeItem('aura_settings'); setSettings(DEFAULT_SETTINGS); }} style={S.dangerBtn}>Reset</button>
-                  </div>
-                  <div style={{...S.settingRow, flexDirection:"column", alignItems:"flex-start", gap:8}}>
-                    <div style={S.settingLabel}>History</div>
-                    <div style={{...S.settingDesc, fontSize:11}}>Temporary storage (max 50 items) | Records: {allHistory.length}</div>
-                  </div>
+                  <div style={S.settingRow}><div><div style={S.settingLabel}>Conversation History</div><div style={S.settingDesc}>Delete all conversations</div></div><button onClick={clearAllHistory} style={S.dangerBtn}>Clear History</button></div>
+                  <div style={S.settingRow}><div><div style={S.settingLabel}>Reset Settings</div><div style={S.settingDesc}>Restore all settings to default values</div></div><button onClick={() => { localStorage.removeItem('aura_settings'); setSettings(DEFAULT_SETTINGS); }} style={S.dangerBtn}>Reset</button></div>
+                  <div style={{...S.settingRow,flexDirection:"column",alignItems:"flex-start",gap:8}}><div style={S.settingLabel}>History</div><div style={{...S.settingDesc,fontSize:11}}>Temporary storage (max 50 items) | Records: {allHistory.length}</div></div>
                 </>
               )}
             </div>
@@ -719,17 +729,8 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
         <div style={S.hero}>
           {!activeFeature && !isTransitioning && (
             <div style={{...S.featureGrid, position:"absolute", left:60, top:"50%", transform:"translateY(-50%)", marginTop:0}}>
-              {[
-                {k:"voice", label:"AI VOICE", val:"ASSISTANT", ic:"🎙️"},
-                {k:"chatbot", label:"CHATBOT", val:"ASSISTANT", ic:"💬"},
-                {k:"lense", label:"AI LENSE", val:"VISION", ic:"📷"},
-                {k:"news", label:"AI NEWS", val:"READER", ic:"📰"},
-              ].map(({k,label,val,ic}) => (
-                <button key={k} className="feat-btn"
-                  onClick={() => handleFeatureClick(k)}
-                  onMouseEnter={() => setHoveredFeature(k)}
-                  onMouseLeave={() => setHoveredFeature(null)}
-                  style={{animationDelay:k==="chatbot"?"0.3s":k==="lense"?"0.6s":k==="news"?"0.9s":"0s"}}>
+              {[{k:"voice",label:"AI VOICE",val:"ASSISTANT",ic:"🎙️"},{k:"chatbot",label:"CHATBOT",val:"ASSISTANT",ic:"💬"},{k:"lense",label:"AI LENSE",val:"VISION",ic:"📷"},{k:"news",label:"AI NEWS",val:"READER",ic:"📰"}].map(({k,label,val,ic}) => (
+                <button key={k} className="feat-btn" onClick={() => handleFeatureClick(k)} onMouseEnter={() => setHoveredFeature(k)} onMouseLeave={() => setHoveredFeature(null)} style={{animationDelay:k==="chatbot"?"0.3s":k==="lense"?"0.6s":k==="news"?"0.9s":"0s"}}>
                   <div style={{fontSize:22,marginBottom:4}}>{ic}</div>
                   <div style={S.featureLabel}>{label}</div>
                   <div style={S.featureValue}>{val}</div>
@@ -780,23 +781,90 @@ const backgroundVideoUrl = "/Iron Man Avengers Infinity War Version Marvel Deskt
 
           {activeFeature === "lense" && !isTransitioning && (
             <div style={S.lenseSection}>
-              <div style={S.lenseHeader}><span style={S.lenseIcon}>📷</span><span style={S.lenseTitle}>AI LENSE</span><span style={S.lenseSubtitle}>Capture or upload an image and ask anything</span></div>
+              <div style={S.lenseHeader}>
+                <span style={S.lenseIcon}>📷</span>
+                <span style={S.lenseTitle}>AI LENSE</span>
+                <span style={S.lenseSubtitle}>Capture or upload an image and ask anything</span>
+              </div>
+
+              {/* Action buttons — always visible */}
               <div style={S.actionButtons}>
                 <button onClick={startCamera} style={S.cameraBtn}>📷 Camera</button>
                 <label htmlFor="imageUpload" style={S.galleryBtn}>📁 Gallery</label>
                 <input type="file" ref={fileInputRef} accept="image/*" onChange={handleImageUpload} style={S.fileInput} id="imageUpload"/>
               </div>
-              {showCamera&&(<div style={S.cameraContainer}><Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" videoConstraints={{facingMode:"environment"}} style={S.cameraPreview}/><div style={S.cameraButtons}><button onClick={capturePhoto} style={S.captureBtn}>📸 Capture</button><button onClick={closeCamera} style={S.closeCameraBtn}>✕ Close</button></div></div>)}
-              {imagePreview&&!showCamera&&(<div style={S.imagePreviewContainer}><img src={imagePreview} alt="Preview" style={S.imagePreview}/><button onClick={clearImage} style={S.clearImageBtn}>✕ Clear</button></div>)}
-              {imagePreview&&!showCamera&&(<div style={S.questionArea}><input type="text" value={visionQuestion} onChange={e=>setVisionQuestion(e.target.value)} onKeyPress={e=>e.key==="Enter"&&handleVisionSubmit()} placeholder="Ask about this image..." style={S.lenseInput}/><button onClick={handleVisionSubmit} disabled={visionLoading} style={S.analyzeBtn}>{visionLoading?"⏳ Analyzing...":"🔍 Analyze"}</button></div>)}
-              {(visionAnswer||visionLoading)&&!showCamera&&(<div style={S.visionResponseContainer}><div style={S.visionResponseHeader}><span>✨</span><span style={S.visionResponseTitle}>AI ANALYSIS</span></div><div style={S.visionResponseContent}>{visionLoading?<div style={S.loadingDots}><span>●</span><span>●</span><span>●</span></div>:<div style={S.visionResponseText}>{visionAnswer}</div>}</div></div>)}
-              {!imagePreview&&!showCamera&&(<div style={S.noImageMessage}><span>📷 Tap Camera to take a photo</span><span>📁 Tap Gallery to upload</span></div>)}
+
+              {/* Camera view */}
+              {showCamera && (
+                <div style={S.cameraContainer}>
+                  <Webcam audio={false} ref={webcamRef} screenshotFormat="image/jpeg" videoConstraints={{facingMode:"environment"}} style={S.cameraPreview}/>
+                  <div style={S.cameraButtons}>
+                    <button onClick={capturePhoto} style={S.captureBtn}>📸 Capture</button>
+                    <button onClick={closeCamera} style={S.closeCameraBtn}>✕ Close</button>
+                  </div>
+                </div>
+              )}
+
+              {/* Image preview */}
+              {imagePreview && !showCamera && (
+                <div style={S.imagePreviewContainer}>
+                  <img src={imagePreview} alt="Preview" style={S.imagePreview}/>
+                  <button onClick={clearImage} style={S.clearImageBtn}>✕ Clear</button>
+                </div>
+              )}
+
+              {/* Question + Analyze button */}
+              {imagePreview && !showCamera && (
+                <div style={S.questionArea}>
+                  <input
+                    type="text"
+                    value={visionQuestion}
+                    onChange={e => setVisionQuestion(e.target.value)}
+                    onKeyPress={e => e.key === "Enter" && !cooldownActive && handleVisionSubmit()}
+                    placeholder={cooldownActive ? `⏳ Wait ${cooldownMins}:${cooldownSecsRem.toString().padStart(2,'0')} to analyze again...` : "Ask about this image..."}
+                    style={{...S.lenseInput, opacity: cooldownActive ? 0.6 : 1}}
+                    disabled={cooldownActive}
+                  />
+                  <button
+                    onClick={handleVisionSubmit}
+                    disabled={visionLoading || cooldownActive}
+                    className={cooldownActive ? "analyze-btn-cooldown" : "analyze-btn-ready"}
+                    style={{...S.analyzeBtn, ...(cooldownActive ? {background:"rgba(255,180,0,0.12)",borderColor:"rgba(255,180,0,0.3)",color:"#ffb400",cursor:"not-allowed"} : {})}}
+                  >
+                    {visionLoading ? "⏳ Analyzing..." : cooldownActive ? `⏳ ${cooldownMins}:${cooldownSecsRem.toString().padStart(2,'0')}` : "🔍 Analyze"}
+                  </button>
+                </div>
+              )}
+
+              {/* ── COOLDOWN BANNER ─────────────────────────────────────────── */}
+              {cooldownActive && <CooldownBanner />}
+
+              {/* Vision result */}
+              {(visionAnswer || visionLoading) && !showCamera && (
+                <div style={S.visionResponseContainer}>
+                  <div style={S.visionResponseHeader}><span>✨</span><span style={S.visionResponseTitle}>AI ANALYSIS</span></div>
+                  <div style={S.visionResponseContent}>
+                    {visionLoading
+                      ? <div style={S.loadingDots}><span>●</span><span>●</span><span>●</span></div>
+                      : <div style={S.visionResponseText}>{visionAnswer}</div>
+                    }
+                  </div>
+                </div>
+              )}
+
+              {!imagePreview && !showCamera && (
+                <div style={S.noImageMessage}>
+                  <span>📷 Tap Camera to take a photo</span>
+                  <span>📁 Tap Gallery to upload</span>
+                </div>
+              )}
+
               <button onClick={handleBackToMenu} style={S.backToMenuBtn}>← Back to Menu</button>
             </div>
           )}
 
           {activeFeature === "news" && !isTransitioning && (
-            <div style={{...S.newsSection, ...(info ? {marginRight:300, maxWidth:680} : {})}}>
+            <div style={{...S.newsSection,...(info?{marginRight:300,maxWidth:680}:{})}}>
               <div style={S.newsHeader}><span style={S.newsIcon}>📰</span><span style={S.newsTitle}>LATEST NEWS</span><span style={S.newsCount}>{news.length} articles</span><button onClick={()=>fetchNews(selectedCategory)} style={S.newsRefreshBtn} disabled={newsLoading}>{newsLoading?"⟳":"🔄"}</button>{readingNews&&<button onClick={stopReading} style={S.newsStopBtn}>⏹️ Stop</button>}</div>
               <div style={S.categoryContainer}>{categories.map(cat=>(<button key={cat.id} onClick={()=>setSelectedCategory(cat.id)} style={{...S.categoryBtn,...(selectedCategory===cat.id?S.categoryActive:{})}}>{cat.emoji} {cat.name}</button>))}</div>
               <div style={S.newsList}>
@@ -842,7 +910,7 @@ const S = {
   fadeOverlay: { position:"fixed",top:0,left:0,width:"100%",height:"100%",backgroundColor:"rgba(0,0,0,0.35)",zIndex:9999,pointerEvents:"none",animation:"overlayFade 1.2s ease forwards" },
   backgroundVideo: { position:"absolute",top:0,left:0,width:"100%",height:"100%",objectFit:"cover",objectPosition:"center",zIndex:0,pointerEvents:"none" },
   topLeftBrand: { position:"fixed",top:20,left:24,zIndex:100,display:"flex",alignItems:"center",gap:10,background:"rgba(0,0,0,0.45)",backdropFilter:"blur(10px)",borderRadius:14,padding:"8px 18px",border:"1px solid rgba(74,255,158,0.3)" },
-  brandMain: { fontSize:22, fontWeight:800, fontFamily:"'Orbitron',sans-serif", color:"#4aff9e", letterSpacing:2, lineHeight:1.2 },
+  brandMain: { fontSize:22,fontWeight:800,fontFamily:"'Orbitron',sans-serif",color:"#4aff9e",letterSpacing:2,lineHeight:1.2 },
   brandSub: { fontSize:7,fontWeight:500,color:"rgba(255,255,255,0.7)",letterSpacing:1.5,fontFamily:"'Orbitron',sans-serif" },
   bottomLeftDisclaimer: { position:"fixed",bottom:20,left:24,zIndex:100,background:"rgba(0,0,0,0.4)",backdropFilter:"blur(8px)",padding:"6px 14px",borderRadius:20,fontSize:10,color:"rgba(255,255,255,0.55)",letterSpacing:0.5,border:"1px solid rgba(255,255,255,0.1)" },
   topRight: { position:"fixed",top:18,right:24,zIndex:100,display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8 },
@@ -891,7 +959,7 @@ const S = {
   dangerBtn: { padding:"8px 16px",background:"rgba(255,68,68,0.15)",border:"1px solid rgba(255,68,68,0.3)",borderRadius:8,color:"#ff6b6b",cursor:"pointer",fontSize:12,fontWeight:600 },
   toggle: { width:44,height:24,borderRadius:12,cursor:"pointer",transition:"background .2s",position:"relative",display:"flex",alignItems:"center",padding:"0 2px" },
   toggleKnob: { width:20,height:20,borderRadius:"50%",background:"#fff",transition:"transform .2s",position:"absolute" },
-  weatherCardFixed: { position:"fixed", bottom:70, right:20, zIndex:100, display:"flex", alignItems:"center", gap:12, background:"rgba(0,0,0,0.55)", border:"1px solid rgba(255,255,255,0.18)", borderRadius:16, padding:"9px 18px", backdropFilter:"blur(12px)" },
+  weatherCardFixed: { position:"fixed",bottom:70,right:20,zIndex:100,display:"flex",alignItems:"center",gap:12,background:"rgba(0,0,0,0.55)",border:"1px solid rgba(255,255,255,0.18)",borderRadius:16,padding:"9px 18px",backdropFilter:"blur(12px)" },
   bottomNav: { position:"fixed",bottom:20,right:20,zIndex:100,display:"flex",gap:10,alignItems:"center" },
   navBtn: { padding:"9px 18px",background:"rgba(0,0,0,0.55)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:22,color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500,backdropFilter:"blur(10px)",transition:"all .2s",letterSpacing:.3 },
   main: { position:"relative",flex:1,overflowY:"auto",zIndex:2 },
@@ -899,7 +967,6 @@ const S = {
   featureGrid: { display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:20,width:"100%",maxWidth:460 },
   featureLabel: { fontSize:11,color:"rgba(255,255,255,0.7)",letterSpacing:"1px",marginBottom:5 },
   featureValue: { fontSize:13,fontWeight:600,color:"#4aff9e",letterSpacing:"1px" },
-  weatherCard: { display:"flex",alignItems:"center",gap:15,background:"rgba(0,0,0,0.45)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:16,padding:"10px 20px" },
   temp: { fontSize:16,fontWeight:700,color:"#fff" },
   weatherDesc: { fontSize:11,color:"rgba(255,255,255,0.85)",fontWeight:500 },
   locationText: { fontSize:11,color:"#4aff9e",marginLeft:"auto",fontWeight:600 },
@@ -955,7 +1022,18 @@ const S = {
   clearImageBtn: { position:"absolute",top:5,right:5,background:"rgba(0,0,0,0.6)",border:"none",color:"#fff",padding:"3px 8px",borderRadius:20,cursor:"pointer",fontSize:10 },
   questionArea: { display:"flex",gap:10,marginBottom:15 },
   lenseInput: { flex:1,padding:10,background:"rgba(255,255,255,0.1)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:12,color:"#fff",fontSize:12,outline:"none" },
-  analyzeBtn: { padding:"10px 20px",background:"rgba(74,255,158,0.2)",border:"1px solid rgba(74,255,158,0.3)",borderRadius:12,color:"#4aff9e",cursor:"pointer",fontSize:12,fontWeight:500 },
+  analyzeBtn: { padding:"10px 20px",borderRadius:12,fontSize:12,fontWeight:500,border:"1px solid rgba(74,255,158,0.3)",background:"rgba(74,255,158,0.2)",color:"#4aff9e",cursor:"pointer",transition:"all .2s",minWidth:110,textAlign:"center" },
+
+  // ── COOLDOWN BANNER ─────────────────────────────────────────────────────────
+  cooldownBanner: { background:"rgba(255,180,0,0.08)",border:"1px solid rgba(255,180,0,0.3)",borderRadius:14,padding:"14px 16px",marginBottom:14,animation:"cooldownPulse 2s ease-in-out infinite" },
+  cooldownTop: { display:"flex",alignItems:"center",gap:10,marginBottom:10 },
+  cooldownIcon: { fontSize:18 },
+  cooldownLabel: { fontSize:9,fontFamily:"'Orbitron',sans-serif",color:"rgba(255,180,0,0.8)",letterSpacing:1.5,fontWeight:700,flex:1 },
+  cooldownTime: { fontSize:22,fontWeight:800,color:"#ffb400",fontFamily:"'Orbitron',sans-serif",letterSpacing:2,minWidth:70,textAlign:"right" },
+  cooldownBarBg: { height:5,background:"rgba(255,255,255,0.08)",borderRadius:10,overflow:"hidden",marginBottom:10 },
+  cooldownBarFill: { height:"100%",borderRadius:10,background:"linear-gradient(90deg,#ffb400,#ff6b00)",transition:"width 1s linear",backgroundSize:"200% 100%",animation:"barFlow 2s linear infinite" },
+  cooldownSub: { fontSize:10,color:"rgba(255,255,255,0.45)",lineHeight:1.5 },
+
   visionResponseContainer: { background:"rgba(74,255,158,0.08)",borderRadius:16,border:"1px solid rgba(74,255,158,0.2)",overflow:"hidden",marginTop:15 },
   visionResponseHeader: { display:"flex",alignItems:"center",gap:8,padding:"10px 16px",background:"rgba(0,0,0,0.2)",borderBottom:"1px solid rgba(74,255,158,0.15)" },
   visionResponseTitle: { fontSize:10,fontWeight:600,color:"#4aff9e",letterSpacing:1 },
